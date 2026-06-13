@@ -141,7 +141,6 @@ OFFICIAL_RSS_SOURCES = {
         "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0003",
         "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0004",
     ],
-    "FDA": [],
     "EMA": [
         "https://www.ema.europa.eu/en/news.xml",
         "https://www.ema.europa.eu/en/whats-new.xml",
@@ -157,6 +156,7 @@ OFFICIAL_RSS_SOURCES = {
 # - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/medwatch/rss.xml
 # - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/drugs/rss.xml
 # - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/biologics/rss.xml
+# Add FDA back to OFFICIAL_RSS_SOURCES when a parseable official RSS XML URL is confirmed.
 
 
 # =========================================================
@@ -378,6 +378,7 @@ def fetch_official_updates() -> dict[str, list[dict]]:
     updates_by_agency = {}
 
     for agency, rss_urls in OFFICIAL_RSS_SOURCES.items():
+        print(f"[공식기관 수집] {agency}")
         agency_candidates = []
         seen_links = set()
         seen_titles = set()
@@ -391,6 +392,9 @@ def fetch_official_updates() -> dict[str, list[dict]]:
 
             if getattr(feed, "bozo", False):
                 print(f"[경고] 공식기관 RSS 파싱 경고: {agency} / {rss_url}")
+
+            print(f"  RSS URL: {rss_url}")
+            print(f"  entries: {len(feed.entries)}")
 
             for entry in feed.entries:
                 # 공식기관 RSS는 오전/오후 브리핑 시간창을 적용하지 않는다.
@@ -430,6 +434,7 @@ def fetch_official_updates() -> dict[str, list[dict]]:
         )
 
         updates_by_agency[agency] = agency_candidates[:OFFICIAL_ITEMS_PER_AGENCY]
+        print(f"  selected: {len(updates_by_agency[agency])}")
 
     return updates_by_agency
 
@@ -677,14 +682,6 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
   3) 제목
      링크
 
-  [FDA]
-  1) 제목
-     링크
-  2) 제목
-     링크
-  3) 제목
-     링크
-
 2. AI 주요 동향
 - 요약:
 - 실무 시사점:
@@ -885,6 +882,31 @@ def make_basic_briefing_html(selected_by_category: dict) -> str:
     return "\n".join(blocks)
 
 
+def make_official_updates_html(official_updates: dict[str, list[dict]], section_number: int = 1) -> str:
+    blocks = [
+        f'<div style="{CATEGORY_TITLE_STYLE}">{section_number}. 공식기관 업데이트</div>'
+    ]
+
+    for agency, agency_items in official_updates.items():
+        blocks.append(f'<div style="{AGENCY_TITLE_STYLE}">[{escape(agency)}]</div>')
+
+        if not agency_items:
+            blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 업데이트가 없습니다.</div>')
+            continue
+
+        for item in agency_items:
+            blocks.append(
+                make_article_html(
+                    item["title"],
+                    item["source"],
+                    item["link"],
+                    show_source=False,
+                )
+            )
+
+    return "\n".join(blocks)
+
+
 def is_category_heading(line: str) -> bool:
     categories = ["공식기관 업데이트", *CATEGORIES.keys()]
 
@@ -973,6 +995,27 @@ def make_ai_briefing_html(briefing: str) -> str:
     return "\n".join(blocks)
 
 
+def remove_ai_official_section(briefing: str) -> str:
+    lines = briefing.splitlines()
+    filtered_lines = []
+    skipping_official_section = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped == "1. 공식기관 업데이트":
+            skipping_official_section = True
+            continue
+
+        if skipping_official_section and re.match(r"^2\.\s+", stripped):
+            skipping_official_section = False
+
+        if not skipping_official_section:
+            filtered_lines.append(line)
+
+    return "\n".join(filtered_lines).strip()
+
+
 # =========================================================
 # 10. 메일 본문 생성
 # =========================================================
@@ -992,11 +1035,19 @@ def make_email_body(selected_by_category: dict, period: str, today: str) -> str:
     else:
         briefing = generate_basic_briefing(selected_by_category)
 
-    briefing_html = (
-        make_ai_briefing_html(briefing)
-        if used_gemini
-        else make_basic_briefing_html(selected_by_category)
-    )
+    if used_gemini:
+        official_html = make_official_updates_html(
+            selected_by_category.get("공식기관 업데이트", {}),
+            section_number=1,
+        )
+        briefing_html = "\n".join(
+            [
+                official_html,
+                make_ai_briefing_html(remove_ai_official_section(briefing)),
+            ]
+        )
+    else:
+        briefing_html = make_basic_briefing_html(selected_by_category)
 
     return f"""<!doctype html>
 <html>
