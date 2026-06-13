@@ -63,6 +63,9 @@ FINAL_ITEMS_PER_CATEGORY = int(os.environ.get("FINAL_ITEMS_PER_CATEGORY", "3"))
 # 검색어별 가져올 기사 수
 ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "5"))
 
+OFFICIAL_ITEMS_LIMIT = 3
+OFFICIAL_ITEMS_PER_SOURCE = 3
+
 KST = ZoneInfo("Asia/Seoul")
 BRIEFING_LOOKBACK_HOURS = {
     "morning": 18,
@@ -134,6 +137,28 @@ CATEGORIES = {
     ],
 }
 
+OFFICIAL_RSS_SOURCES = {
+    "MFDS": [
+        "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0003",
+        "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0004",
+    ],
+    "FDA": [],
+    "EMA": [
+        "https://www.ema.europa.eu/en/news.xml",
+        "https://www.ema.europa.eu/en/whats-new.xml",
+        "https://www.ema.europa.eu/en/inspections.xml",
+    ],
+}
+
+# FDA/EMA landing pages are not feed XML and are intentionally not parsed:
+# - https://www.fda.gov/about-fda/contact-fda/subscribe-podcasts-and-news-feeds
+# - https://www.ema.europa.eu/en/news-events/rss-feeds
+# FDA feed candidates below returned 404 during direct URL verification, so they are not parsed:
+# - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml
+# - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/medwatch/rss.xml
+# - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/drugs/rss.xml
+# - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/biologics/rss.xml
+
 
 # =========================================================
 # 3. 점수화 기준
@@ -155,6 +180,18 @@ AI_TERMS = [
 LOW_VALUE_TERMS = [
     "주가", "급등", "폭등", "테마주", "관련주", "광고",
     "연예", "루머", "맛집", "할인", "이벤트",
+]
+
+OFFICIAL_HIGH_VALUE_TERMS = [
+    "gmp", "의약품", "바이오의약품", "백신", "품질", "안전성",
+    "허가", "심사", "규제", "data integrity", "validation",
+    "manufacturing", "drug", "biologics", "vaccine", "medicine",
+    "medicinal product",
+]
+
+OFFICIAL_LOW_VALUE_TERMS = [
+    "채용", "행사", "공모", "교육", "설명회", "워크숍", "세미나",
+    "recruit", "career", "event", "webinar", "workshop",
 ]
 
 AUTHORITY_TERMS = [
@@ -323,6 +360,92 @@ def select_final_articles(candidates: list[dict], limit: int) -> list[dict]:
     return representatives[:limit]
 
 
+def score_official_update(title: str) -> int:
+    title_lower = title.lower()
+    score = 0
+
+    for term in OFFICIAL_HIGH_VALUE_TERMS:
+        if term.lower() in title_lower:
+            score += 10
+
+    for term in OFFICIAL_LOW_VALUE_TERMS:
+        if term.lower() in title_lower:
+            score -= 8
+
+    return score
+
+
+def fetch_official_updates(period: str, now: datetime) -> list[dict]:
+    candidates = []
+    seen_links = set()
+    seen_titles = set()
+
+    for agency, rss_urls in OFFICIAL_RSS_SOURCES.items():
+        agency_candidates = []
+
+        for rss_url in rss_urls:
+            try:
+                feed = feedparser.parse(rss_url)
+            except Exception as e:
+                print(f"[경고] 공식기관 RSS 수집 실패: {agency} / {rss_url} / {e}")
+                continue
+
+            if getattr(feed, "bozo", False):
+                print(f"[경고] 공식기관 RSS 파싱 경고: {agency} / {rss_url}")
+
+            for entry in feed.entries:
+                if not is_entry_in_briefing_window(entry, period, now):
+                    continue
+
+                title = entry.get("title", "").strip()
+                link = entry.get("link", "").strip()
+                published_at = get_entry_published_datetime(entry)
+
+                if not title or not link:
+                    continue
+
+                normalized = normalize_title(title)
+
+                if link in seen_links or normalized in seen_titles:
+                    continue
+
+                item = {
+                    "category": "공식기관 업데이트",
+                    "title": title,
+                    "source": agency,
+                    "link": link,
+                    "published_at": published_at,
+                    "official_score": score_official_update(title),
+                    "candidate_order": len(candidates) + len(agency_candidates),
+                }
+                agency_candidates.append(item)
+                seen_links.add(link)
+                seen_titles.add(normalized)
+
+        agency_candidates.sort(
+            key=lambda item: (
+                item["official_score"],
+                item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
+                -item["candidate_order"],
+            ),
+            reverse=True,
+        )
+
+        for item in agency_candidates[:OFFICIAL_ITEMS_PER_SOURCE]:
+            candidates.append(item)
+
+    candidates.sort(
+        key=lambda item: (
+            item["official_score"],
+            item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            -item["candidate_order"],
+        ),
+        reverse=True,
+    )
+
+    return candidates[:OFFICIAL_ITEMS_LIMIT]
+
+
 def fetch_category_news(category_name: str, queries: list[str], period: str, now: datetime) -> list[dict]:
     items = []
     seen_links = set()
@@ -447,6 +570,16 @@ def score_article(item: dict) -> int:
 def collect_selected_news(period: str, now: datetime) -> dict:
     selected_by_category = {}
 
+    print("[수집] 공식기관 업데이트")
+    try:
+        official_updates = fetch_official_updates(period, now)
+    except Exception as e:
+        print(f"[경고] 공식기관 업데이트 수집 실패. 빈 섹션으로 계속 진행합니다: {e}")
+        official_updates = []
+
+    selected_by_category["공식기관 업데이트"] = official_updates
+    print(f"  공식기관 업데이트 {len(official_updates)}개 선별")
+
     for category_name, queries in CATEGORIES.items():
         print(f"[수집] {category_name}")
         candidates = fetch_category_news(category_name, queries, period, now)
@@ -470,7 +603,10 @@ def build_articles_text(selected_by_category: dict) -> str:
         lines.append(f"\n[{category}]")
 
         if not items:
-            lines.append("- 수집된 기사 없음")
+            if category == "공식기관 업데이트":
+                lines.append("- 수집된 주요 공식기관 업데이트가 없습니다.")
+            else:
+                lines.append("- 수집된 기사 없음")
             continue
 
         for idx, item in enumerate(items, start=1):
@@ -487,7 +623,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
     briefing_context = get_briefing_prompt_context(period)
 
     prompt = f"""
-다음은 Google News RSS에서 수집한 AI, 제약·바이오, 백신·바이오의약품, GMP·품질 관련 기사 후보입니다.
+다음은 공식기관 RSS와 Google News RSS에서 수집한 AI, 제약·바이오, 백신·바이오의약품, GMP·품질 관련 기사 후보입니다.
 
 당신은 백신안전, 의약품 안전, GMP, 규제과학, 교육기획 관점에서 정해진 발송 시점에 읽을 수 있는 브리핑을 작성해야 합니다.
 
@@ -504,6 +640,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 7. 공식기관 입장처럼 쓰지 말고, 공개자료 기반 브리핑이라는 톤을 유지할 것.
 8. 관련성 점수, 검색 키워드, 점수, query라는 표현은 출력하지 말 것.
 9. 각 카테고리의 주요 기사에는 기사 제목, 출처, 링크만 포함할 것.
+10. 주요 기사 또는 주요 업데이트의 링크 줄에는 실제 URL을 작성할 것.
 
 기사 목록:
 {articles_text}
@@ -515,7 +652,18 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 
 ──────────
 
-1. AI 주요 동향
+1. 공식기관 업데이트
+- 요약:
+- 실무 시사점:
+- 주요 업데이트:
+  1) 제목 · 기관명
+     링크
+  2) 제목 · 기관명
+     링크
+  3) 제목 · 기관명
+     링크
+
+2. AI 주요 동향
 - 요약:
 - 실무 시사점:
 - 주요 기사:
@@ -526,7 +674,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
   3) 기사 제목 · 출처
      링크
 
-2. AI × 제약·바이오
+3. AI × 제약·바이오
 - 요약:
 - 실무 시사점:
 - 주요 기사:
@@ -537,7 +685,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
   3) 기사 제목 · 출처
      링크
 
-3. 백신·바이오의약품
+4. 백신·바이오의약품
 - 요약:
 - 실무 시사점:
 - 주요 기사:
@@ -548,7 +696,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
   3) 기사 제목 · 출처
      링크
 
-4. GMP·품질·Data Integrity
+5. GMP·품질·Data Integrity
 - 요약:
 - 실무 시사점:
 - 주요 기사:
@@ -559,7 +707,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
   3) 기사 제목 · 출처
      링크
 
-5. 교육·홍보자료 활용 포인트
+6. 교육·홍보자료 활용 포인트
 - 포인트 1:
 - 포인트 2:
 - 포인트 3:
@@ -581,7 +729,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
         ],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2500,
+            "maxOutputTokens": 3200,
         }
     }
 
@@ -611,7 +759,10 @@ def generate_basic_briefing(selected_by_category: dict) -> str:
         lines.append(f"{idx}. {category}")
 
         if not items:
-            lines.append("- 수집된 주요 기사가 없습니다.")
+            if category == "공식기관 업데이트":
+                lines.append("- 수집된 주요 공식기관 업데이트가 없습니다.")
+            else:
+                lines.append("- 수집된 주요 기사가 없습니다.")
             lines.append("")
             continue
 
@@ -661,7 +812,10 @@ def make_basic_briefing_html(selected_by_category: dict) -> str:
         )
 
         if not items:
-            blocks.append('<div style="margin-bottom: 14px;">수집된 주요 기사가 없습니다.</div>')
+            if category == "공식기관 업데이트":
+                blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 공식기관 업데이트가 없습니다.</div>')
+            else:
+                blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 기사가 없습니다.</div>')
             continue
 
         for item in items:
@@ -677,9 +831,11 @@ def make_basic_briefing_html(selected_by_category: dict) -> str:
 
 
 def is_category_heading(line: str) -> bool:
+    categories = ["공식기관 업데이트", *CATEGORIES.keys()]
+
     return any(
         line == f"{idx}. {category}"
-        for idx, category in enumerate(CATEGORIES.keys(), start=1)
+        for idx, category in enumerate(categories, start=1)
     )
 
 
