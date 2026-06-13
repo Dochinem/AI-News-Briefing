@@ -1,6 +1,7 @@
 import os
 import re
 import smtplib
+from difflib import SequenceMatcher
 import feedparser
 import requests
 from datetime import datetime
@@ -127,6 +128,38 @@ AUTHORITY_TERMS = [
     "ich", "pic/s", "보건복지부", "중기부",
 ]
 
+SOURCE_PRIORITY = {
+    "식약처": 100,
+    "질병관리청": 100,
+    "FDA": 100,
+    "EMA": 100,
+    "WHO": 100,
+    "약사공론": 80,
+    "약업신문": 80,
+    "데일리팜": 80,
+    "의학신문": 75,
+    "메디파나뉴스": 75,
+    "뉴스더보이스헬스케어": 75,
+    "연합뉴스": 70,
+    "머니투데이": 65,
+    "한국경제": 65,
+    "매일경제": 65,
+    "조선비즈": 65,
+    "BRIC": 50,
+    "v.daum.net": 40,
+}
+
+
+def get_source_priority(source: str) -> int:
+    source_text = source or ""
+    source_text_lower = source_text.lower()
+
+    for source_name, priority in SOURCE_PRIORITY.items():
+        if source_name.lower() in source_text_lower:
+            return priority
+
+    return 30
+
 
 # =========================================================
 # 4. RSS 수집 함수
@@ -151,6 +184,92 @@ def normalize_title(title: str) -> str:
     )
 
 
+def clean_google_news_title(title: str, source: str) -> str:
+    cleaned_title = title.strip()
+    cleaned_source = source.strip()
+
+    if not cleaned_source or cleaned_source == "출처 미상":
+        return cleaned_title
+
+    suffix_pattern = re.compile(rf"\s-\s{re.escape(cleaned_source)}\s*$")
+
+    if suffix_pattern.search(cleaned_title):
+        return suffix_pattern.sub("", cleaned_title, count=1).strip()
+
+    return cleaned_title
+
+
+def normalize_title_for_similarity(title: str) -> str:
+    normalized = title.lower()
+
+    for source_name in SOURCE_PRIORITY:
+        normalized = normalized.replace(source_name.lower(), "")
+
+    normalized = re.sub(r"[\s\"'“”‘’\[\]\(\){}<>〈〉《》「」『』·,.:;!?…_\-–—/\\|]", "", normalized)
+    return normalized.strip()
+
+
+def is_similar_issue(title_a: str, title_b: str) -> bool:
+    normalized_a = normalize_title_for_similarity(title_a)
+    normalized_b = normalize_title_for_similarity(title_b)
+
+    if not normalized_a or not normalized_b:
+        return False
+
+    similarity = SequenceMatcher(None, normalized_a, normalized_b).ratio()
+    return similarity >= 0.82
+
+
+def select_representative_article(group: list[dict]) -> dict:
+    return max(
+        group,
+        key=lambda item: (
+            item["source_priority"],
+            item["score"],
+            -item["candidate_order"],
+        ),
+    )
+
+
+def group_similar_issues(candidates: list[dict]) -> list[list[dict]]:
+    groups = []
+
+    for item in candidates:
+        matched_group = None
+
+        for group in groups:
+            if any(is_similar_issue(item["title"], grouped_item["title"]) for grouped_item in group):
+                matched_group = group
+                break
+
+        if matched_group is None:
+            groups.append([item])
+        else:
+            matched_group.append(item)
+
+    return groups
+
+
+def select_final_articles(candidates: list[dict], limit: int) -> list[dict]:
+    issue_groups = group_similar_issues(candidates)
+    representatives = [
+        select_representative_article(group)
+        for group in issue_groups
+    ]
+
+    representatives.sort(
+        key=lambda item: (
+            item["score"] + item["source_priority"],
+            item["score"],
+            item["source_priority"],
+            -item["candidate_order"],
+        ),
+        reverse=True,
+    )
+
+    return representatives[:limit]
+
+
 def fetch_category_news(category_name: str, queries: list[str]) -> list[dict]:
     items = []
     seen_links = set()
@@ -164,6 +283,7 @@ def fetch_category_news(category_name: str, queries: list[str]) -> list[dict]:
             title = entry.get("title", "").strip()
             link = entry.get("link", "").strip()
             source = entry.get("source", {}).get("title", "출처 미상")
+            title = clean_google_news_title(title, source)
 
             if not title or not link:
                 continue
@@ -185,6 +305,8 @@ def fetch_category_news(category_name: str, queries: list[str]) -> list[dict]:
                 "title": title,
                 "source": source,
                 "link": link,
+                "candidate_order": len(items),
+                "source_priority": get_source_priority(source),
             }
 
             item["score"] = score_article(item)
@@ -273,7 +395,7 @@ def collect_selected_news() -> dict:
         print(f"[수집] {category_name}")
         candidates = fetch_category_news(category_name, queries)
 
-        selected = candidates[:FINAL_ITEMS_PER_CATEGORY]
+        selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY)
         selected_by_category[category_name] = selected
 
         print(f"  후보 {len(candidates)}개 중 {len(selected)}개 선별")
