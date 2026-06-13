@@ -63,8 +63,7 @@ FINAL_ITEMS_PER_CATEGORY = int(os.environ.get("FINAL_ITEMS_PER_CATEGORY", "3"))
 # 검색어별 가져올 기사 수
 ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "5"))
 
-OFFICIAL_ITEMS_LIMIT = 3
-OFFICIAL_ITEMS_PER_SOURCE = 3
+OFFICIAL_ITEMS_PER_AGENCY = 3
 
 KST = ZoneInfo("Asia/Seoul")
 BRIEFING_LOOKBACK_HOURS = {
@@ -375,13 +374,13 @@ def score_official_update(title: str) -> int:
     return score
 
 
-def fetch_official_updates() -> list[dict]:
-    candidates = []
-    seen_links = set()
-    seen_titles = set()
+def fetch_official_updates() -> dict[str, list[dict]]:
+    updates_by_agency = {}
 
     for agency, rss_urls in OFFICIAL_RSS_SOURCES.items():
         agency_candidates = []
+        seen_links = set()
+        seen_titles = set()
 
         for rss_url in rss_urls:
             try:
@@ -415,7 +414,7 @@ def fetch_official_updates() -> list[dict]:
                     "link": link,
                     "published_at": published_at,
                     "official_score": score_official_update(title),
-                    "candidate_order": len(candidates) + len(agency_candidates),
+                    "candidate_order": len(agency_candidates),
                 }
                 agency_candidates.append(item)
                 seen_links.add(link)
@@ -430,19 +429,9 @@ def fetch_official_updates() -> list[dict]:
             reverse=True,
         )
 
-        for item in agency_candidates[:OFFICIAL_ITEMS_PER_SOURCE]:
-            candidates.append(item)
+        updates_by_agency[agency] = agency_candidates[:OFFICIAL_ITEMS_PER_AGENCY]
 
-    candidates.sort(
-        key=lambda item: (
-            item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
-            item["official_score"],
-            -item["candidate_order"],
-        ),
-        reverse=True,
-    )
-
-    return candidates[:OFFICIAL_ITEMS_LIMIT]
+    return updates_by_agency
 
 
 def fetch_category_news(category_name: str, queries: list[str], period: str, now: datetime) -> list[dict]:
@@ -574,10 +563,14 @@ def collect_selected_news(period: str, now: datetime) -> dict:
         official_updates = fetch_official_updates()
     except Exception as e:
         print(f"[경고] 공식기관 업데이트 수집 실패. 빈 섹션으로 계속 진행합니다: {e}")
-        official_updates = []
+        official_updates = {
+            agency: []
+            for agency in OFFICIAL_RSS_SOURCES
+        }
 
     selected_by_category["공식기관 업데이트"] = official_updates
-    print(f"  공식기관 업데이트 {len(official_updates)}개 선별")
+    total_official_updates = sum(len(items) for items in official_updates.values())
+    print(f"  공식기관 업데이트 {total_official_updates}개 선별")
 
     for category_name, queries in CATEGORIES.items():
         print(f"[수집] {category_name}")
@@ -601,11 +594,24 @@ def build_articles_text(selected_by_category: dict) -> str:
     for category, items in selected_by_category.items():
         lines.append(f"\n[{category}]")
 
+        if category == "공식기관 업데이트":
+            for agency, agency_items in items.items():
+                lines.append(f"[{agency}]")
+
+                if not agency_items:
+                    lines.append("- 수집된 주요 업데이트가 없습니다.")
+                    lines.append("")
+                    continue
+
+                for idx, item in enumerate(agency_items, start=1):
+                    lines.append(f"{idx}. {item['title']} / {item['link']}")
+
+                lines.append("")
+
+            continue
+
         if not items:
-            if category == "공식기관 업데이트":
-                lines.append("- 수집된 주요 공식기관 업데이트가 없습니다.")
-            else:
-                lines.append("- 수집된 기사 없음")
+            lines.append("- 수집된 기사 없음")
             continue
 
         for idx, item in enumerate(items, start=1):
@@ -655,11 +661,28 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 - 요약:
 - 실무 시사점:
 - 주요 업데이트:
-  1) 제목 · 기관명
+  [MFDS]
+  1) 제목
      링크
-  2) 제목 · 기관명
+  2) 제목
      링크
-  3) 제목 · 기관명
+  3) 제목
+     링크
+
+  [EMA]
+  1) 제목
+     링크
+  2) 제목
+     링크
+  3) 제목
+     링크
+
+  [FDA]
+  1) 제목
+     링크
+  2) 제목
+     링크
+  3) 제목
      링크
 
 2. AI 주요 동향
@@ -757,11 +780,25 @@ def generate_basic_briefing(selected_by_category: dict) -> str:
     for idx, (category, items) in enumerate(selected_by_category.items(), start=1):
         lines.append(f"{idx}. {category}")
 
+        if category == "공식기관 업데이트":
+            for agency, agency_items in items.items():
+                lines.append(f"[{agency}]")
+
+                if not agency_items:
+                    lines.append("- 수집된 주요 업데이트가 없습니다.")
+                    lines.append("")
+                    continue
+
+                for item in agency_items:
+                    lines.append(f"- {item['title']}")
+                    lines.append(f"  {item['link']}")
+
+                lines.append("")
+
+            continue
+
         if not items:
-            if category == "공식기관 업데이트":
-                lines.append("- 수집된 주요 공식기관 업데이트가 없습니다.")
-            else:
-                lines.append("- 수집된 주요 기사가 없습니다.")
+            lines.append("- 수집된 주요 기사가 없습니다.")
             lines.append("")
             continue
 
@@ -787,16 +824,18 @@ CATEGORY_TITLE_STYLE = (
 
 ARTICLE_BLOCK_STYLE = "margin-bottom: 14px;"
 ARTICLE_TITLE_STYLE = "font-weight: 600;"
+AGENCY_TITLE_STYLE = "font-weight: bold; margin-top: 12px; margin-bottom: 8px;"
 
 
-def make_article_html(title: str, source: str, link: str) -> str:
+def make_article_html(title: str, source: str, link: str, show_source: bool = True) -> str:
     safe_title = escape(title)
     safe_source = escape(source)
     safe_link = escape(link, quote=True)
+    title_text = f"{safe_title} · {safe_source}" if show_source else safe_title
 
     return (
         f'<div style="{ARTICLE_BLOCK_STYLE}">'
-        f'<div style="{ARTICLE_TITLE_STYLE}">{safe_title} · {safe_source}</div>'
+        f'<div style="{ARTICLE_TITLE_STYLE}">{title_text}</div>'
         f'<div><a href="{safe_link}">기사 원문 보기</a></div>'
         "</div>"
     )
@@ -810,11 +849,28 @@ def make_basic_briefing_html(selected_by_category: dict) -> str:
             f'<div style="{CATEGORY_TITLE_STYLE}">{idx}. {escape(category)}</div>'
         )
 
+        if category == "공식기관 업데이트":
+            for agency, agency_items in items.items():
+                blocks.append(f'<div style="{AGENCY_TITLE_STYLE}">[{escape(agency)}]</div>')
+
+                if not agency_items:
+                    blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 업데이트가 없습니다.</div>')
+                    continue
+
+                for item in agency_items:
+                    blocks.append(
+                        make_article_html(
+                            item["title"],
+                            item["source"],
+                            item["link"],
+                            show_source=False,
+                        )
+                    )
+
+            continue
+
         if not items:
-            if category == "공식기관 업데이트":
-                blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 공식기관 업데이트가 없습니다.</div>')
-            else:
-                blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 기사가 없습니다.</div>')
+            blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 기사가 없습니다.</div>')
             continue
 
         for item in items:
@@ -850,6 +906,9 @@ def make_text_line_html(line: str) -> str:
 
     if is_category_heading(line):
         return f'<div style="{CATEGORY_TITLE_STYLE}">{safe_line}</div>'
+
+    if re.fullmatch(r"\[[A-Za-z0-9가-힣·\s]+\]", line):
+        return f'<div style="{AGENCY_TITLE_STYLE}">{safe_line}</div>'
 
     if set(line) == {"─"}:
         return '<hr style="border: 0; border-top: 1px solid #dddddd; margin: 22px 0;">'
