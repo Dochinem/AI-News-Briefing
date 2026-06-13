@@ -375,7 +375,7 @@ def score_official_update(title: str) -> int:
     return score
 
 
-def fetch_official_updates(period: str, now: datetime) -> list[dict]:
+def fetch_official_updates() -> list[dict]:
     candidates = []
     seen_links = set()
     seen_titles = set()
@@ -394,9 +394,8 @@ def fetch_official_updates(period: str, now: datetime) -> list[dict]:
                 print(f"[경고] 공식기관 RSS 파싱 경고: {agency} / {rss_url}")
 
             for entry in feed.entries:
-                if not is_entry_in_briefing_window(entry, period, now):
-                    continue
-
+                # 공식기관 RSS는 오전/오후 브리핑 시간창을 적용하지 않는다.
+                # 며칠 전 항목이어도 RSS상 최신이고 관련성이 높으면 표시될 수 있게 한다.
                 title = entry.get("title", "").strip()
                 link = entry.get("link", "").strip()
                 published_at = get_entry_published_datetime(entry)
@@ -424,8 +423,8 @@ def fetch_official_updates(period: str, now: datetime) -> list[dict]:
 
         agency_candidates.sort(
             key=lambda item: (
-                item["official_score"],
                 item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
+                item["official_score"],
                 -item["candidate_order"],
             ),
             reverse=True,
@@ -436,8 +435,8 @@ def fetch_official_updates(period: str, now: datetime) -> list[dict]:
 
     candidates.sort(
         key=lambda item: (
-            item["official_score"],
             item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            item["official_score"],
             -item["candidate_order"],
         ),
         reverse=True,
@@ -572,7 +571,7 @@ def collect_selected_news(period: str, now: datetime) -> dict:
 
     print("[수집] 공식기관 업데이트")
     try:
-        official_updates = fetch_official_updates(period, now)
+        official_updates = fetch_official_updates()
     except Exception as e:
         print(f"[경고] 공식기관 업데이트 수집 실패. 빈 섹션으로 계속 진행합니다: {e}")
         official_updates = []
