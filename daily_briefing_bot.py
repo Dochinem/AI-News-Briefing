@@ -4,9 +4,10 @@ import smtplib
 from difflib import SequenceMatcher
 import feedparser
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -61,6 +62,39 @@ FINAL_ITEMS_PER_CATEGORY = int(os.environ.get("FINAL_ITEMS_PER_CATEGORY", "3"))
 
 # 검색어별 가져올 기사 수
 ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "5"))
+
+KST = ZoneInfo("Asia/Seoul")
+BRIEFING_LOOKBACK_HOURS = {
+    "morning": 18,
+    "afternoon": 6,
+}
+
+
+def get_kst_now() -> datetime:
+    return datetime.now(KST)
+
+
+def get_briefing_period(now: datetime | None = None) -> str:
+    now = now or get_kst_now()
+
+    if now.hour < 12:
+        return "morning"
+
+    return "afternoon"
+
+
+def get_briefing_label(period: str) -> str:
+    return "오전" if period == "morning" else "오후"
+
+
+def get_briefing_prompt_context(period: str) -> str:
+    if period == "morning":
+        return "전날 오후부터 당일 오전까지 확인된 공개 뉴스 중심의 오전 브리핑"
+
+    return (
+        "당일 오전 이후 새로 확인된 공개 뉴스 중심의 오후 업데이트 브리핑. "
+        "오전 브리핑과 중복될 가능성이 있는 반복 이슈는 가능하면 새로운 관점이 있을 때만 포함"
+    )
 
 
 # =========================================================
@@ -199,6 +233,25 @@ def clean_google_news_title(title: str, source: str) -> str:
     return cleaned_title
 
 
+def get_entry_published_datetime(entry: dict) -> datetime | None:
+    published_time = entry.get("published_parsed") or entry.get("updated_parsed")
+
+    if not published_time:
+        return None
+
+    return datetime(*published_time[:6], tzinfo=timezone.utc)
+
+
+def is_entry_in_briefing_window(entry: dict, period: str, now: datetime) -> bool:
+    published_at = get_entry_published_datetime(entry)
+
+    if published_at is None:
+        return True
+
+    lookback_hours = BRIEFING_LOOKBACK_HOURS[period]
+    return published_at >= now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+
+
 def normalize_title_for_similarity(title: str) -> str:
     normalized = title.lower()
 
@@ -270,7 +323,7 @@ def select_final_articles(candidates: list[dict], limit: int) -> list[dict]:
     return representatives[:limit]
 
 
-def fetch_category_news(category_name: str, queries: list[str]) -> list[dict]:
+def fetch_category_news(category_name: str, queries: list[str], period: str, now: datetime) -> list[dict]:
     items = []
     seen_links = set()
     seen_titles = set()
@@ -280,6 +333,9 @@ def fetch_category_news(category_name: str, queries: list[str]) -> list[dict]:
         feed = feedparser.parse(rss_url)
 
         for entry in feed.entries[:ITEMS_PER_QUERY]:
+            if not is_entry_in_briefing_window(entry, period, now):
+                continue
+
             title = entry.get("title", "").strip()
             link = entry.get("link", "").strip()
             source = entry.get("source", {}).get("title", "출처 미상")
@@ -388,12 +444,12 @@ def score_article(item: dict) -> int:
 # 6. 전체 뉴스 수집 및 카테고리별 선별
 # =========================================================
 
-def collect_selected_news() -> dict:
+def collect_selected_news(period: str, now: datetime) -> dict:
     selected_by_category = {}
 
     for category_name, queries in CATEGORIES.items():
         print(f"[수집] {category_name}")
-        candidates = fetch_category_news(category_name, queries)
+        candidates = fetch_category_news(category_name, queries, period, now)
 
         selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY)
         selected_by_category[category_name] = selected
@@ -426,13 +482,17 @@ def build_articles_text(selected_by_category: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
+def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) -> str:
     articles_text = build_articles_text(selected_by_category)
+    briefing_context = get_briefing_prompt_context(period)
 
     prompt = f"""
 다음은 Google News RSS에서 수집한 AI, 제약·바이오, 백신·바이오의약품, GMP·품질 관련 기사 후보입니다.
 
-당신은 백신안전, 의약품 안전, GMP, 규제과학, 교육기획 관점에서 매일 아침 읽을 수 있는 브리핑을 작성해야 합니다.
+당신은 백신안전, 의약품 안전, GMP, 규제과학, 교육기획 관점에서 정해진 발송 시점에 읽을 수 있는 브리핑을 작성해야 합니다.
+
+이번 브리핑 시점:
+{briefing_context}
 
 작성 기준:
 1. 과장하지 말 것.
@@ -703,13 +763,13 @@ def make_ai_briefing_html(briefing: str) -> str:
 # 10. 메일 본문 생성
 # =========================================================
 
-def make_email_body(selected_by_category: dict) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
+def make_email_body(selected_by_category: dict, period: str, today: str) -> str:
+    briefing_label = get_briefing_label(period)
     used_gemini = False
 
     if USE_GEMINI:
         try:
-            briefing = generate_ai_briefing_with_gemini(selected_by_category)
+            briefing = generate_ai_briefing_with_gemini(selected_by_category, period)
             used_gemini = True
         except Exception as e:
             print("[경고] Gemini 브리핑 생성 실패. 기본 브리핑으로 대체합니다.")
@@ -729,7 +789,7 @@ def make_email_body(selected_by_category: dict) -> str:
   <body style="margin: 0; padding: 0; background-color: #ffffff;">
     <div style="font-family: Arial, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; color: #222222; font-size: 14px; line-height: 1.6;">
       <div style="font-size: 22px; font-weight: bold; margin-bottom: 18px;">
-        📰 오늘의 AI·GMP·바이오의약품 이슈 브리핑 ({escape(today)})
+        📰 {escape(briefing_label)} AI·GMP·바이오의약품 이슈 브리핑 ({escape(today)})
       </div>
       {briefing_html}
       <hr style="border: 0; border-top: 1px solid #dddddd; margin: 24px 0 14px;">
@@ -771,19 +831,27 @@ def send_email(subject: str, body: str) -> None:
 # =========================================================
 
 def main():
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = get_kst_now()
+    today = now.strftime("%Y-%m-%d")
+    period = get_briefing_period(now)
+    briefing_label = get_briefing_label(period)
 
     print("========================================")
     print("Daily AI·GMP·Bio Briefing Bot")
     print("========================================")
     print(f"실행일: {today}")
+    print(f"브리핑 구분: {briefing_label}")
     print(f"Gemini 사용 여부: {USE_GEMINI}")
     print("")
 
-    selected_by_category = collect_selected_news()
+    selected_by_category = collect_selected_news(period, now)
 
-    subject = f"[Daily Briefing] {today}, 오늘의 AI·GMP·바이오의약품 이슈"
-    body = make_email_body(selected_by_category)
+    if period == "morning":
+        subject = f"[Morning Briefing] {today}, AI·GMP·바이오의약품 이슈"
+    else:
+        subject = f"[Afternoon Briefing] {today}, AI·GMP·바이오의약품 이슈"
+
+    body = make_email_body(selected_by_category, period, today)
 
     print("")
     print("[메일 발송 시작]")
