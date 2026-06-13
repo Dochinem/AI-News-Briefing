@@ -1,8 +1,10 @@
 import os
+import re
 import smtplib
 import feedparser
 import requests
 from datetime import datetime
+from html import escape
 from urllib.parse import quote
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -441,15 +443,152 @@ def generate_basic_briefing(selected_by_category: dict) -> str:
 
 
 # =========================================================
-# 9. 메일 본문 생성
+# 9. HTML 메일 본문 생성
+# =========================================================
+
+CATEGORY_TITLE_STYLE = (
+    "font-size: 18px; "
+    "font-weight: bold; "
+    "margin-top: 24px; "
+    "margin-bottom: 10px;"
+)
+
+ARTICLE_BLOCK_STYLE = "margin-bottom: 14px;"
+ARTICLE_TITLE_STYLE = "font-weight: 600;"
+
+
+def make_article_html(title: str, source: str, link: str) -> str:
+    safe_title = escape(title)
+    safe_source = escape(source)
+    safe_link = escape(link, quote=True)
+
+    return (
+        f'<div style="{ARTICLE_BLOCK_STYLE}">'
+        f'<div style="{ARTICLE_TITLE_STYLE}">{safe_title} · {safe_source}</div>'
+        f'<div><a href="{safe_link}">기사 원문 보기</a></div>'
+        "</div>"
+    )
+
+
+def make_basic_briefing_html(selected_by_category: dict) -> str:
+    blocks = []
+
+    for idx, (category, items) in enumerate(selected_by_category.items(), start=1):
+        blocks.append(
+            f'<div style="{CATEGORY_TITLE_STYLE}">{idx}. {escape(category)}</div>'
+        )
+
+        if not items:
+            blocks.append('<div style="margin-bottom: 14px;">수집된 주요 기사가 없습니다.</div>')
+            continue
+
+        for item in items:
+            blocks.append(
+                make_article_html(
+                    item["title"],
+                    item["source"],
+                    item["link"],
+                )
+            )
+
+    return "\n".join(blocks)
+
+
+def is_category_heading(line: str) -> bool:
+    return any(
+        line == f"{idx}. {category}"
+        for idx, category in enumerate(CATEGORIES.keys(), start=1)
+    )
+
+
+def make_text_line_html(line: str) -> str:
+    safe_line = escape(line)
+
+    if line == "🗞️ 핵심 브리핑":
+        return (
+            '<div style="font-size: 20px; font-weight: bold; '
+            'margin-top: 4px; margin-bottom: 12px;">'
+            f"{safe_line}</div>"
+        )
+
+    if is_category_heading(line):
+        return f'<div style="{CATEGORY_TITLE_STYLE}">{safe_line}</div>'
+
+    if set(line) == {"─"}:
+        return '<hr style="border: 0; border-top: 1px solid #dddddd; margin: 22px 0;">'
+
+    return f'<div style="margin-bottom: 8px; line-height: 1.6;">{safe_line}</div>'
+
+
+def make_ai_briefing_html(briefing: str) -> str:
+    blocks = []
+    pending_article_title = None
+    url_pattern = re.compile(r"^https?://\S+$")
+    article_pattern = re.compile(r"^\d+\)\s+(.+)$")
+
+    for raw_line in briefing.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        article_match = article_pattern.match(line)
+        if article_match:
+            if pending_article_title:
+                blocks.append(
+                    f'<div style="{ARTICLE_BLOCK_STYLE}">'
+                    f'<div style="{ARTICLE_TITLE_STYLE}">{escape(pending_article_title)}</div>'
+                    "</div>"
+                )
+            pending_article_title = article_match.group(1).strip()
+            continue
+
+        if url_pattern.match(line):
+            safe_link = escape(line, quote=True)
+            if pending_article_title:
+                blocks.append(
+                    f'<div style="{ARTICLE_BLOCK_STYLE}">'
+                    f'<div style="{ARTICLE_TITLE_STYLE}">{escape(pending_article_title)}</div>'
+                    f'<div><a href="{safe_link}">기사 원문 보기</a></div>'
+                    "</div>"
+                )
+                pending_article_title = None
+            else:
+                blocks.append(f'<div style="{ARTICLE_BLOCK_STYLE}"><a href="{safe_link}">기사 원문 보기</a></div>')
+            continue
+
+        if pending_article_title:
+            blocks.append(
+                f'<div style="{ARTICLE_BLOCK_STYLE}">'
+                f'<div style="{ARTICLE_TITLE_STYLE}">{escape(pending_article_title)}</div>'
+                "</div>"
+            )
+            pending_article_title = None
+
+        blocks.append(make_text_line_html(line))
+
+    if pending_article_title:
+        blocks.append(
+            f'<div style="{ARTICLE_BLOCK_STYLE}">'
+            f'<div style="{ARTICLE_TITLE_STYLE}">{escape(pending_article_title)}</div>'
+            "</div>"
+        )
+
+    return "\n".join(blocks)
+
+
+# =========================================================
+# 10. 메일 본문 생성
 # =========================================================
 
 def make_email_body(selected_by_category: dict) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
+    used_gemini = False
 
     if USE_GEMINI:
         try:
             briefing = generate_ai_briefing_with_gemini(selected_by_category)
+            used_gemini = True
         except Exception as e:
             print("[경고] Gemini 브리핑 생성 실패. 기본 브리핑으로 대체합니다.")
             print(e)
@@ -457,20 +596,32 @@ def make_email_body(selected_by_category: dict) -> str:
     else:
         briefing = generate_basic_briefing(selected_by_category)
 
-    lines = []
-    lines.append(f"📰 오늘의 AI·GMP·바이오의약품 이슈 브리핑 ({today})")
-    lines.append("")
-    lines.append(briefing)
-    lines.append("")
-    lines.append("──────────")
-    lines.append("※ AI 요약은 원문 확인을 대체하지 않으며, 내부 공식자료로 활용 전 원문 검토가 필요합니다.")
-    lines.append("※ 기사 제목·출처·링크는 Google News RSS 검색 결과를 기반으로 합니다.")
+    briefing_html = (
+        make_ai_briefing_html(briefing)
+        if used_gemini
+        else make_basic_briefing_html(selected_by_category)
+    )
 
-    return "\n".join(lines)
+    return f"""<!doctype html>
+<html>
+  <body style="margin: 0; padding: 0; background-color: #ffffff;">
+    <div style="font-family: Arial, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; color: #222222; font-size: 14px; line-height: 1.6;">
+      <div style="font-size: 22px; font-weight: bold; margin-bottom: 18px;">
+        📰 오늘의 AI·GMP·바이오의약품 이슈 브리핑 ({escape(today)})
+      </div>
+      {briefing_html}
+      <hr style="border: 0; border-top: 1px solid #dddddd; margin: 24px 0 14px;">
+      <div style="font-size: 12px; color: #555555; line-height: 1.7;">
+        <div>※ AI 요약은 원문 확인을 대체하지 않으며, 내부 공식자료로 활용 전 원문 검토가 필요합니다.</div>
+        <div>※ 기사 제목·출처·링크는 Google News RSS 검색 결과를 기반으로 합니다.</div>
+      </div>
+    </div>
+  </body>
+</html>"""
 
 
 # =========================================================
-# 10. 메일 발송
+# 11. 메일 발송
 # =========================================================
 
 def send_email(subject: str, body: str) -> None:
@@ -479,7 +630,7 @@ def send_email(subject: str, body: str) -> None:
     message["To"] = formataddr(("IRIS", MAIL_TO_DISPLAY))
     message["Subject"] = subject
 
-    message.attach(MIMEText(body, "plain", "utf-8"))
+    message.attach(MIMEText(body, "html", "utf-8"))
 
     recipients = [MAIL_TO_DISPLAY] + MAIL_BCC
 
@@ -494,7 +645,7 @@ def send_email(subject: str, body: str) -> None:
 
 
 # =========================================================
-# 11. 실행부
+# 12. 실행부
 # =========================================================
 
 def main():
