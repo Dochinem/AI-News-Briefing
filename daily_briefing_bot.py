@@ -295,8 +295,8 @@ def build_articles_text(selected_by_category: dict) -> str:
 
         for idx, item in enumerate(items, start=1):
             lines.append(
-                f"{idx}. {item['title']} / {item['source']} / "
-                f"점수 {item['score']} / {item['link']}"
+                f"{idx}. {item['title']} · {item['source']}\n"
+                f"   {item['link']}"
             )
 
     return "\n".join(lines)
@@ -318,6 +318,8 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
 5. 각 카테고리별로 2~3문장 이내로 간결하게 정리할 것.
 6. 마지막에 교육·홍보자료로 활용 가능한 포인트를 3개 제시할 것.
 7. 공식기관 입장처럼 쓰지 말고, 공개자료 기반 브리핑이라는 톤을 유지할 것.
+8. 관련성 점수, 검색 키워드, 점수, query라는 표현은 출력하지 말 것.
+9. 각 카테고리의 주요 기사에는 기사 제목, 출처, 링크만 포함할 것.
 
 기사 목록:
 {articles_text}
@@ -332,18 +334,46 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
 1. AI 주요 동향
 - 요약:
 - 실무 시사점:
+- 주요 기사:
+  1) 기사 제목 · 출처
+     링크
+  2) 기사 제목 · 출처
+     링크
+  3) 기사 제목 · 출처
+     링크
 
 2. AI × 제약·바이오
 - 요약:
 - 실무 시사점:
+- 주요 기사:
+  1) 기사 제목 · 출처
+     링크
+  2) 기사 제목 · 출처
+     링크
+  3) 기사 제목 · 출처
+     링크
 
 3. 백신·바이오의약품
 - 요약:
 - 실무 시사점:
+- 주요 기사:
+  1) 기사 제목 · 출처
+     링크
+  2) 기사 제목 · 출처
+     링크
+  3) 기사 제목 · 출처
+     링크
 
 4. GMP·품질·Data Integrity
 - 요약:
 - 실무 시사점:
+- 주요 기사:
+  1) 기사 제목 · 출처
+     링크
+  2) 기사 제목 · 출처
+     링크
+  3) 기사 제목 · 출처
+     링크
 
 5. 교육·홍보자료 활용 포인트
 - 포인트 1:
@@ -367,7 +397,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
         ],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 1800,
+            "maxOutputTokens": 2500,
         }
     }
 
@@ -392,14 +422,6 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
 
 def generate_basic_briefing(selected_by_category: dict) -> str:
     lines = []
-    lines.append("🗞️ 핵심 브리핑")
-    lines.append(
-        "오늘 수집된 공개 뉴스 기준으로 AI, 제약·바이오, 백신·바이오의약품, "
-        "GMP·품질 관련 이슈를 카테고리별로 정리했습니다."
-    )
-    lines.append("")
-    lines.append("──────────")
-    lines.append("")
 
     for idx, (category, items) in enumerate(selected_by_category.items(), start=1):
         lines.append(f"{idx}. {category}")
@@ -411,17 +433,9 @@ def generate_basic_briefing(selected_by_category: dict) -> str:
 
         for item in items:
             lines.append(f"- {item['title']} · {item['source']}")
-            lines.append(f"  관련성 점수: {item['score']}")
-            lines.append(f"  검색 키워드: {item['query']}")
-            lines.append(f"  링크: {item['link']}")
+            lines.append(f"  {item['link']}")
 
         lines.append("")
-
-    lines.append("5. 교육·홍보자료 활용 포인트")
-    lines.append("- AI와 제약·바이오 산업 변화 사례를 교육자료 도입부로 활용할 수 있습니다.")
-    lines.append("- GMP·품질·Data Integrity 관련 기사는 실무형 교육 사례로 전환할 수 있습니다.")
-    lines.append("- 백신·바이오의약품 이슈는 산업 동향 및 규제환경 변화 설명 자료로 활용할 수 있습니다.")
-    lines.append("")
 
     return "\n".join(lines)
 
@@ -449,26 +463,6 @@ def make_email_body(selected_by_category: dict) -> str:
     lines.append(briefing)
     lines.append("")
     lines.append("──────────")
-    lines.append("원문 기사 목록")
-    lines.append("")
-
-    for category, items in selected_by_category.items():
-        lines.append(f"[{category}]")
-
-        if not items:
-            lines.append("- 수집된 기사 없음")
-            lines.append("")
-            continue
-
-        for idx, item in enumerate(items, start=1):
-            lines.append(f"{idx}. {item['title']} · {item['source']}")
-            lines.append(f"   - 관련성 점수: {item['score']}")
-            lines.append(f"   - 검색 키워드: {item['query']}")
-            lines.append(f"   🔗 {item['link']}")
-            lines.append("")
-
-    lines.append("──────────")
-    lines.append("※ 본 메일은 공개 뉴스 RSS 기반 자동 수집·요약 테스트입니다.")
     lines.append("※ AI 요약은 원문 확인을 대체하지 않으며, 내부 공식자료로 활용 전 원문 검토가 필요합니다.")
     lines.append("※ 기사 제목·출처·링크는 Google News RSS 검색 결과를 기반으로 합니다.")
 
@@ -481,8 +475,8 @@ def make_email_body(selected_by_category: dict) -> str:
 
 def send_email(subject: str, body: str) -> None:
     message = MIMEMultipart()
-    message["From"] = formataddr(("AI GMP Briefing", MAIL_FROM))
-    message["To"] = formataddr(("AI GMP Briefing", MAIL_TO_DISPLAY))
+    message["From"] = formataddr(("IRIS", MAIL_FROM))
+    message["To"] = formataddr(("IRIS", MAIL_TO_DISPLAY))
     message["Subject"] = subject
 
     message.attach(MIMEText(body, "plain", "utf-8"))
@@ -515,7 +509,7 @@ def main():
 
     selected_by_category = collect_selected_news()
 
-    subject = f"[Daily Briefing] AI·GMP·바이오의약품 이슈 브리핑 - {today}"
+    subject = f"[Daily Briefing] {today}, 오늘의 AI·GMP·바이오의약품 이슈"
     body = make_email_body(selected_by_category)
 
     print("")
