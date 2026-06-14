@@ -2,8 +2,8 @@ name: Daily AI GMP Bio Briefing
 
 on:
   schedule:
-    - cron: "1 0 * * *"
-    - cron: "1 6 * * *"
+    - cron: "17 0 * * *"
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 jobs:
