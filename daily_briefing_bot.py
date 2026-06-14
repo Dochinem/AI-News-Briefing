@@ -66,6 +66,7 @@ FINAL_ITEMS_PER_CATEGORY = int(os.environ.get("FINAL_ITEMS_PER_CATEGORY", "3"))
 ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "10"))
 
 OFFICIAL_ITEMS_PER_AGENCY = 3
+CORE_BRIEFING_MAX_CHARS = 700
 
 KST = ZoneInfo("Asia/Seoul")
 BRIEFING_LOOKBACK_HOURS = {
@@ -985,6 +986,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 7. 공식기관 입장처럼 쓰지 말고, 공개자료 기반 브리핑이라는 톤을 유지할 것.
 8. 관련성 점수, 검색 키워드, 점수, query라는 표현은 출력하지 말 것.
 9. 기사 목록은 별도 HTML 렌더링으로 표시되므로 요약과 실무 시사점 작성에 집중할 것.
+10. 핵심 브리핑은 2~4문장으로 작성하고, 각 문장은 완결된 문장으로 끝내세요. 문장 중간에서 끊기지 않게 작성하세요.
 
 기사 목록:
 {articles_text}
@@ -1122,6 +1124,59 @@ ARTICLE_BLOCK_STYLE = "margin-bottom: 14px;"
 ARTICLE_TITLE_STYLE = "font-weight: 600;"
 AGENCY_TITLE_STYLE = "font-weight: bold; margin-top: 12px; margin-bottom: 8px;"
 SECTION_LABEL_STYLE = "font-weight: bold; margin-top: 10px; margin-bottom: 4px;"
+
+
+def split_sentences(text: str) -> list[str]:
+    sentence_pattern = re.compile(r".+?(?:습니다\.|입니다\.|다\.|요\.|[.!?])(?=\s|$)")
+    sentences = [
+        match.group(0).strip()
+        for match in sentence_pattern.finditer(text)
+        if match.group(0).strip()
+    ]
+    return sentences
+
+
+def truncate_by_sentence(text: str, max_chars: int = CORE_BRIEFING_MAX_CHARS) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+
+    if not normalized:
+        return ""
+
+    sentences = split_sentences(normalized)
+
+    if not sentences:
+        return normalized if len(normalized) <= max_chars else ""
+
+    selected = []
+    current_length = 0
+
+    for sentence in sentences:
+        next_length = current_length + len(sentence) + (1 if selected else 0)
+
+        if selected and (len(selected) >= 4 or next_length > max_chars):
+            break
+
+        if not selected and len(sentence) > max_chars:
+            return ""
+
+        selected.append(sentence)
+        current_length = next_length
+
+        if len(selected) >= 4:
+            break
+
+    if len(selected) < 2 and len(sentences) >= 2:
+        second_sentence = sentences[1]
+        if current_length + len(second_sentence) + 1 <= max_chars:
+            selected.append(second_sentence)
+
+    return " ".join(selected).strip()
+
+
+def normalize_core_briefing_lines(lines: list[str]) -> list[str]:
+    text = " ".join(line.strip() for line in lines if line.strip())
+    truncated = truncate_by_sentence(text, CORE_BRIEFING_MAX_CHARS)
+    return [truncated] if truncated else []
 
 
 def make_article_html(title: str, source: str, link: str, show_source: bool = True) -> str:
@@ -1351,12 +1406,13 @@ def make_education_points_html(points: list[str]) -> str:
 
 def make_structured_briefing_html(selected_by_category: dict, summary_data: dict) -> str:
     blocks = []
+    core_lines = normalize_core_briefing_lines(summary_data.get("core", []))
 
-    if summary_data.get("core"):
+    if core_lines:
         blocks.extend(
             [
                 '<div style="font-size: 18px; font-weight: bold; margin-top: 4px; margin-bottom: 10px;">핵심 브리핑</div>',
-                make_text_block_html(summary_data.get("core", []), "오늘 수집된 주요 이슈를 정리했습니다."),
+                make_text_block_html(core_lines, "오늘 수집된 주요 이슈를 정리했습니다."),
             ]
         )
 
