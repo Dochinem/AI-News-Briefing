@@ -867,8 +867,7 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 6. 마지막에 교육·홍보자료로 활용 가능한 포인트를 3개 제시할 것.
 7. 공식기관 입장처럼 쓰지 말고, 공개자료 기반 브리핑이라는 톤을 유지할 것.
 8. 관련성 점수, 검색 키워드, 점수, query라는 표현은 출력하지 말 것.
-9. 각 카테고리의 주요 기사에는 기사 제목, 출처, 링크만 포함할 것.
-10. 주요 기사 또는 주요 업데이트의 링크 줄에는 실제 URL을 작성할 것.
+9. 기사 목록은 별도 HTML 렌더링으로 표시되므로 요약과 실무 시사점 작성에 집중할 것.
 
 기사 목록:
 {articles_text}
@@ -883,66 +882,22 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
 1. 공식기관 업데이트
 - 요약:
 - 실무 시사점:
-- 주요 업데이트:
-  [MFDS]
-  1) 제목
-     링크
-  2) 제목
-     링크
-  3) 제목
-     링크
-
-  [EMA]
-  1) 제목
-     링크
-  2) 제목
-     링크
-  3) 제목
-     링크
 
 2. AI 주요 동향
 - 요약:
 - 실무 시사점:
-- 주요 기사:
-  1) 기사 제목 · 출처
-     링크
-  2) 기사 제목 · 출처
-     링크
-  3) 기사 제목 · 출처
-     링크
 
 3. AI × 제약·바이오
 - 요약:
 - 실무 시사점:
-- 주요 기사:
-  1) 기사 제목 · 출처
-     링크
-  2) 기사 제목 · 출처
-     링크
-  3) 기사 제목 · 출처
-     링크
 
 4. 백신·바이오의약품
 - 요약:
 - 실무 시사점:
-- 주요 기사:
-  1) 기사 제목 · 출처
-     링크
-  2) 기사 제목 · 출처
-     링크
-  3) 기사 제목 · 출처
-     링크
 
 5. GMP·품질·Data Integrity
 - 요약:
 - 실무 시사점:
-- 주요 기사:
-  1) 기사 제목 · 출처
-     링크
-  2) 기사 제목 · 출처
-     링크
-  3) 기사 제목 · 출처
-     링크
 
 6. 교육·홍보자료 활용 포인트
 - 포인트 1:
@@ -1049,6 +1004,7 @@ CATEGORY_TITLE_STYLE = (
 ARTICLE_BLOCK_STYLE = "margin-bottom: 14px;"
 ARTICLE_TITLE_STYLE = "font-weight: 600;"
 AGENCY_TITLE_STYLE = "font-weight: bold; margin-top: 12px; margin-bottom: 8px;"
+SECTION_LABEL_STYLE = "font-weight: bold; margin-top: 10px; margin-bottom: 4px;"
 
 
 def make_article_html(title: str, source: str, link: str, show_source: bool = True) -> str:
@@ -1130,6 +1086,183 @@ def make_official_updates_html(official_updates: dict[str, list[dict]], section_
                     show_source=False,
                 )
             )
+
+    return "\n".join(blocks)
+
+
+def parse_gemini_briefing_sections(briefing: str) -> dict:
+    parsed = {
+        "core": [],
+        "categories": {
+            category: {"summary": [], "insight": []}
+            for category in CATEGORIES
+        },
+        "education": [],
+    }
+    current_section = None
+    current_field = None
+
+    for raw_line in briefing.splitlines():
+        line = raw_line.strip()
+
+        if not line or set(line) == {"─"}:
+            continue
+
+        if "핵심 브리핑" in line:
+            current_section = "core"
+            current_field = None
+            continue
+
+        section_match = re.match(r"^\d+\.\s+(.+)$", line)
+        if section_match:
+            section_name = section_match.group(1).strip()
+            if section_name in CATEGORIES:
+                current_section = section_name
+                current_field = None
+            elif section_name == "교육·홍보자료 활용 포인트":
+                current_section = "education"
+                current_field = None
+            else:
+                current_section = None
+                current_field = None
+            continue
+
+        if line.startswith("- 주요 기사") or line.startswith("- 주요 업데이트"):
+            current_field = "skip_articles"
+            continue
+
+        if re.match(r"^\d+\)", line) or line.startswith("http"):
+            continue
+
+        if current_section == "core":
+            parsed["core"].append(line.lstrip("- ").strip())
+            continue
+
+        if current_section in CATEGORIES:
+            if line.startswith("- 요약:"):
+                current_field = "summary"
+                value = line.replace("- 요약:", "", 1).strip()
+                if value:
+                    parsed["categories"][current_section]["summary"].append(value)
+                continue
+
+            if line.startswith("- 실무 시사점:"):
+                current_field = "insight"
+                value = line.replace("- 실무 시사점:", "", 1).strip()
+                if value:
+                    parsed["categories"][current_section]["insight"].append(value)
+                continue
+
+            if current_field in {"summary", "insight"}:
+                parsed["categories"][current_section][current_field].append(line.lstrip("- ").strip())
+            continue
+
+        if current_section == "education":
+            parsed["education"].append(line.lstrip("- ").strip())
+
+    return parsed
+
+
+def build_fallback_summary(selected_by_category: dict) -> dict:
+    parsed = {
+        "core": [
+            "오늘 수집된 공개 뉴스와 공식기관 RSS를 기준으로 AI, GMP, 바이오의약품 관련 주요 이슈를 정리했습니다."
+        ],
+        "categories": {},
+        "education": [
+            "공식기관 업데이트는 규제·품질 교육자료의 최신 참고 사례로 활용할 수 있습니다.",
+            "AI 및 바이오의약품 동향은 교육 도입부와 산업 변화 설명 자료로 활용할 수 있습니다.",
+            "GMP·품질 관련 기사는 실무형 사례 토론 주제로 전환할 수 있습니다.",
+        ],
+    }
+
+    for category in CATEGORIES:
+        item_count = len(selected_by_category.get(category, []))
+        parsed["categories"][category] = {
+            "summary": [f"수집된 주요 기사 {item_count}건을 기준으로 정리했습니다."],
+            "insight": ["기사 원문 확인 후 교육·홍보자료 또는 실무 참고자료로 활용할 수 있습니다."],
+        }
+
+    return parsed
+
+
+def make_text_block_html(lines: list[str], empty_text: str) -> str:
+    if not lines:
+        return f'<div style="margin-bottom: 8px; line-height: 1.6;">{escape(empty_text)}</div>'
+
+    return "\n".join(
+        f'<div style="margin-bottom: 8px; line-height: 1.6;">{escape(line)}</div>'
+        for line in lines
+        if line
+    )
+
+
+def make_general_news_category_html(
+    section_number: int,
+    category: str,
+    items: list[dict],
+    summary_data: dict,
+) -> str:
+    blocks = [
+        f'<div style="{CATEGORY_TITLE_STYLE}">{section_number}. {escape(category)}</div>',
+        f'<div style="{SECTION_LABEL_STYLE}">요약</div>',
+        make_text_block_html(summary_data.get("summary", []), "요약 정보가 없습니다."),
+        f'<div style="{SECTION_LABEL_STYLE}">실무 시사점</div>',
+        make_text_block_html(summary_data.get("insight", []), "실무 시사점 정보가 없습니다."),
+        f'<div style="{SECTION_LABEL_STYLE}">주요 기사</div>',
+    ]
+
+    if not items:
+        blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 기사가 없습니다.</div>')
+        return "\n".join(blocks)
+
+    for idx, item in enumerate(items, start=1):
+        blocks.append(
+            '<div style="margin-bottom: 14px;">'
+            f'<div style="{ARTICLE_TITLE_STYLE}">{idx}) {escape(item["title"])}</div>'
+            f'<div><a href="{escape(item["link"], quote=True)}">기사 원문 보기</a></div>'
+            '</div>'
+        )
+
+    return "\n".join(blocks)
+
+
+def make_education_points_html(points: list[str]) -> str:
+    if not points:
+        return ""
+
+    blocks = [
+        f'<div style="{CATEGORY_TITLE_STYLE}">6. 교육·홍보자료 활용 포인트</div>'
+    ]
+    for point in points[:3]:
+        blocks.append(f'<div style="margin-bottom: 8px; line-height: 1.6;">- {escape(point)}</div>')
+
+    return "\n".join(blocks)
+
+
+def make_structured_briefing_html(selected_by_category: dict, summary_data: dict) -> str:
+    blocks = [
+        '<div style="font-size: 20px; font-weight: bold; margin-top: 4px; margin-bottom: 12px;">핵심 브리핑</div>',
+        make_text_block_html(summary_data.get("core", []), "오늘 수집된 주요 이슈를 정리했습니다."),
+        make_official_updates_html(
+            selected_by_category.get("공식기관 업데이트", {}),
+            section_number=1,
+        ),
+    ]
+
+    for section_number, category in enumerate(CATEGORIES.keys(), start=2):
+        blocks.append(
+            make_general_news_category_html(
+                section_number,
+                category,
+                selected_by_category.get(category, []),
+                summary_data.get("categories", {}).get(category, {}),
+            )
+        )
+
+    education_html = make_education_points_html(summary_data.get("education", []))
+    if education_html:
+        blocks.append(education_html)
 
     return "\n".join(blocks)
 
@@ -1249,32 +1382,19 @@ def remove_ai_official_section(briefing: str) -> str:
 
 def make_email_body(selected_by_category: dict, period: str, today: str) -> str:
     briefing_label = get_briefing_label(period)
-    used_gemini = False
 
     if USE_GEMINI:
         try:
             briefing = generate_ai_briefing_with_gemini(selected_by_category, period)
-            used_gemini = True
+            summary_data = parse_gemini_briefing_sections(briefing)
         except Exception as e:
             print("[경고] Gemini 브리핑 생성 실패. 기본 브리핑으로 대체합니다.")
             print(e)
-            briefing = generate_basic_briefing(selected_by_category)
+            summary_data = build_fallback_summary(selected_by_category)
     else:
-        briefing = generate_basic_briefing(selected_by_category)
+        summary_data = build_fallback_summary(selected_by_category)
 
-    if used_gemini:
-        official_html = make_official_updates_html(
-            selected_by_category.get("공식기관 업데이트", {}),
-            section_number=1,
-        )
-        briefing_html = "\n".join(
-            [
-                official_html,
-                make_ai_briefing_html(remove_ai_official_section(briefing)),
-            ]
-        )
-    else:
-        briefing_html = make_basic_briefing_html(selected_by_category)
+    briefing_html = make_structured_briefing_html(selected_by_category, summary_data)
 
     return f"""<!doctype html>
 <html>
