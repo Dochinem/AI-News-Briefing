@@ -2,8 +2,8 @@ name: Daily AI GMP Bio Briefing
 
 on:
   schedule:
-    - cron: "4 23 * * *"  # KST 08:04
-    - cron: "44 7 * * *"   # KST 16:44
+    - cron: "54 22 * * *"  # KST 07:54
+    - cron: "54 5 * * *"   # KST 14:54
   workflow_dispatch:
 
 jobs:
