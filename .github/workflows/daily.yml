@@ -2,8 +2,8 @@ name: Daily AI GMP Bio Briefing
 
 on:
   schedule:
-    - cron: "4 23 * * *"
-    - cron: "34 7 * * *"
+    - cron: "4 23 * * *"  # KST 08:04
+    - cron: "44 7 * * *"   # KST 16:44
   workflow_dispatch:
 
 jobs:
@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
