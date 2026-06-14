@@ -1097,6 +1097,7 @@ def send_email(subject: str, body: str) -> None:
 
 def main():
     now = get_kst_now()
+    utc_now = now.astimezone(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     period = get_briefing_period(now)
     briefing_label = get_briefing_label(period)
@@ -1104,6 +1105,9 @@ def main():
     print("========================================")
     print("Daily AI·GMP·Bio Briefing Bot")
     print("========================================")
+    print("[실행 시간]")
+    print(f"UTC: {utc_now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"실행일: {today}")
     print(f"브리핑 구분: {briefing_label}")
     print(f"Gemini 사용 여부: {USE_GEMINI}")
