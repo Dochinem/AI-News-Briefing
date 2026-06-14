@@ -63,7 +63,7 @@ USE_GEMINI = True if GEMINI_API_KEY else False
 FINAL_ITEMS_PER_CATEGORY = int(os.environ.get("FINAL_ITEMS_PER_CATEGORY", "3"))
 
 # 검색어별 가져올 기사 수
-ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "5"))
+ITEMS_PER_QUERY = int(os.environ.get("ITEMS_PER_QUERY", "10"))
 
 OFFICIAL_ITEMS_PER_AGENCY = 3
 
@@ -72,6 +72,7 @@ BRIEFING_LOOKBACK_HOURS = {
     "morning": 18,
     "afternoon": 6,
 }
+RELAXED_CATEGORY_LOOKBACK_HOURS = 72
 
 
 def get_kst_now() -> datetime:
@@ -121,20 +122,77 @@ CATEGORIES = {
         "AI drug discovery",
     ],
     "백신·바이오의약품": [
+        "백신",
         "백신 개발",
         "백신 생산",
+        "백신 제조",
         "바이오의약품",
         "첨단바이오의약품",
+        "항체의약품",
+        "세포치료제",
+        "유전자치료제",
         "mRNA 백신",
+        "CDMO 바이오의약품",
+        "바이오시밀러",
+        "바이오의약품 허가",
+        "바이오의약품 품질",
+        "vaccine development",
+        "vaccine manufacturing",
+        "biologics",
+        "biopharmaceutical",
+        "biosimilar",
+        "cell therapy",
+        "gene therapy",
+        "mRNA vaccine",
+        "biologics manufacturing",
+        "biopharma CDMO",
     ],
     "GMP·품질·Data Integrity": [
-        "GMP",
         "의약품 GMP",
+        "GMP",
+        "의약품 품질",
+        "제약 품질",
+        "제약 밸리데이션",
+        "밸리데이션",
         "Data Integrity",
         "데이터 무결성",
-        "의약품 품질",
-        "밸리데이션",
-        "의약품 규제",
+        "제조소 실사",
+        "의약품 제조관리",
+        "의약품 품질관리",
+        "GMP 실사",
+        "GMP 위반",
+        "의약품 회수",
+        "품질 부적합",
+        "경고서",
+        "규제기관 실사",
+        "pharmaceutical GMP",
+        "GMP inspection",
+        "GMP compliance",
+        "data integrity",
+        "pharmaceutical quality",
+        "quality management system",
+        "validation",
+        "computer system validation",
+        "FDA warning letter GMP",
+        "GMP deficiencies",
+        "manufacturing quality",
+        "drug recall quality",
+    ],
+}
+
+CRITICAL_CATEGORY_FALLBACK_QUERIES = {
+    "백신·바이오의약품": [
+        "바이오의약품 OR 백신",
+        "바이오시밀러 OR 항체의약품",
+        "첨단바이오의약품 OR 세포치료제 OR 유전자치료제",
+        "vaccine OR biologics OR biosimilar",
+    ],
+    "GMP·품질·Data Integrity": [
+        "GMP OR 의약품 품질",
+        "데이터 무결성 OR Data Integrity",
+        "밸리데이션 OR validation",
+        "GMP 실사 OR GMP inspection",
+        "pharmaceutical quality OR GMP compliance",
     ],
 }
 
@@ -203,6 +261,7 @@ OFFICIAL_HIGH_VALUE_TERMS = [
 OFFICIAL_LOW_VALUE_TERMS = [
     "채용", "행사", "공모", "교육", "설명회", "워크숍", "세미나",
     "recruit", "career", "event", "webinar", "workshop",
+    "면접전형", "직원 채용", "공무원지침서", "상세보기", "고시 제",
 ]
 
 EMA_LOW_VALUE_TERMS = [
@@ -211,6 +270,10 @@ EMA_LOW_VALUE_TERMS = [
     "document revision",
     "status update",
     "assessment report",
+    "public assessment report",
+    "revision",
+    "status: authorised",
+    "date of authorisation",
 ]
 
 EMA_HIGH_VALUE_TERMS = [
@@ -310,6 +373,18 @@ def is_entry_in_briefing_window(entry: dict, period: str, now: datetime) -> bool
         return True
 
     lookback_hours = BRIEFING_LOOKBACK_HOURS[period]
+    return published_at >= now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
+
+
+def is_entry_in_lookback_window(entry: dict, now: datetime, lookback_hours: int | None) -> bool:
+    if lookback_hours is None:
+        return True
+
+    published_at = get_entry_published_datetime(entry)
+
+    if published_at is None:
+        return True
+
     return published_at >= now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
 
 
@@ -487,6 +562,15 @@ def score_official_update(title: str, agency: str = "", rss_url: str = "") -> in
     return score
 
 
+def is_low_quality_official_update(title: str, agency: str) -> bool:
+    title_lower = title.lower()
+
+    if agency == "MFDS":
+        return any(term.lower() in title_lower for term in OFFICIAL_LOW_VALUE_TERMS)
+
+    return False
+
+
 def parse_mfds_rss_with_diagnostics(rss_url: str):
     print("[MFDS RSS 진단]")
     print(f"URL: {rss_url}")
@@ -545,8 +629,8 @@ def sort_official_candidates(candidates: list[dict]) -> list[dict]:
     return sorted(
         candidates,
         key=lambda item: (
-            item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
             item["official_score"],
+            item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
             -item["candidate_order"],
         ),
         reverse=True,
@@ -571,6 +655,9 @@ def fetch_mfds_fallback_updates(existing_links: set, existing_titles: set) -> li
             published_at = get_entry_published_datetime(entry)
 
             if not title or not link:
+                continue
+
+            if is_low_quality_official_update(title, "MFDS"):
                 continue
 
             normalized = normalize_title(title)
@@ -629,6 +716,9 @@ def fetch_official_updates() -> dict[str, list[dict]]:
                 if not title or not link:
                     continue
 
+                if is_low_quality_official_update(title, agency):
+                    continue
+
                 normalized = normalize_title(title)
 
                 if link in seen_links or normalized in seen_titles:
@@ -657,17 +747,28 @@ def fetch_official_updates() -> dict[str, list[dict]]:
     return updates_by_agency
 
 
-def fetch_category_news(category_name: str, queries: list[str], period: str, now: datetime) -> list[dict]:
+def fetch_category_news(
+    category_name: str,
+    queries: list[str],
+    period: str,
+    now: datetime,
+    lookback_hours: int | None = None,
+) -> list[dict]:
     items = []
     seen_links = set()
     seen_titles = set()
+    effective_lookback_hours = (
+        BRIEFING_LOOKBACK_HOURS[period]
+        if lookback_hours is None
+        else lookback_hours
+    )
 
     for query in queries:
         rss_url = build_google_news_rss_url(query)
         feed = feedparser.parse(rss_url)
 
         for entry in feed.entries[:ITEMS_PER_QUERY]:
-            if not is_entry_in_briefing_window(entry, period, now):
+            if not is_entry_in_lookback_window(entry, now, effective_lookback_hours):
                 continue
 
             title = entry.get("title", "").strip()
@@ -800,6 +901,22 @@ def collect_selected_news(period: str, now: datetime) -> dict:
         candidates = fetch_category_news(category_name, queries, period, now)
 
         selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY, category_name)
+
+        if not selected and category_name in CRITICAL_CATEGORY_FALLBACK_QUERIES:
+            print(f"[fallback 검색] {category_name}: 최근 {RELAXED_CATEGORY_LOOKBACK_HOURS}시간 기준으로 재검색")
+            fallback_candidates = fetch_category_news(
+                category_name,
+                CRITICAL_CATEGORY_FALLBACK_QUERIES[category_name],
+                period,
+                now,
+                lookback_hours=RELAXED_CATEGORY_LOOKBACK_HOURS,
+            )
+            selected = select_final_articles(
+                fallback_candidates,
+                FINAL_ITEMS_PER_CATEGORY,
+                f"{category_name} fallback",
+            )
+
         selected_by_category[category_name] = selected
 
         print(f"  후보 {len(candidates)}개 중 {len(selected)}개 선별")
@@ -977,7 +1094,7 @@ def generate_basic_briefing(selected_by_category: dict) -> str:
             continue
 
         if not items:
-            lines.append("- 수집된 주요 기사가 없습니다.")
+            lines.append("- 최근 선별 기준을 충족하는 주요 기사가 없습니다.")
             lines.append("")
             continue
 
@@ -1015,7 +1132,7 @@ def make_article_html(title: str, source: str, link: str, show_source: bool = Tr
 
     return (
         f'<div style="{ARTICLE_BLOCK_STYLE}">'
-        f'<div style="{ARTICLE_TITLE_STYLE}">{title_text}</div>'
+        f'<div style="{ARTICLE_TITLE_STYLE}">- {title_text}</div>'
         f'<div><a href="{safe_link}">기사 원문 보기</a></div>'
         "</div>"
     )
@@ -1165,9 +1282,7 @@ def parse_gemini_briefing_sections(briefing: str) -> dict:
 
 def build_fallback_summary(selected_by_category: dict) -> dict:
     parsed = {
-        "core": [
-            "오늘 수집된 공개 뉴스와 공식기관 RSS를 기준으로 AI, GMP, 바이오의약품 관련 주요 이슈를 정리했습니다."
-        ],
+        "core": [],
         "categories": {},
         "education": [
             "공식기관 업데이트는 규제·품질 교육자료의 최신 참고 사례로 활용할 수 있습니다.",
@@ -1201,25 +1316,19 @@ def make_general_news_category_html(
     section_number: int,
     category: str,
     items: list[dict],
-    summary_data: dict,
 ) -> str:
     blocks = [
         f'<div style="{CATEGORY_TITLE_STYLE}">{section_number}. {escape(category)}</div>',
-        f'<div style="{SECTION_LABEL_STYLE}">요약</div>',
-        make_text_block_html(summary_data.get("summary", []), "요약 정보가 없습니다."),
-        f'<div style="{SECTION_LABEL_STYLE}">실무 시사점</div>',
-        make_text_block_html(summary_data.get("insight", []), "실무 시사점 정보가 없습니다."),
-        f'<div style="{SECTION_LABEL_STYLE}">주요 기사</div>',
     ]
 
     if not items:
-        blocks.append('<div style="margin-bottom: 14px;">- 수집된 주요 기사가 없습니다.</div>')
+        blocks.append('<div style="margin-bottom: 14px;">- 최근 선별 기준을 충족하는 주요 기사가 없습니다.</div>')
         return "\n".join(blocks)
 
-    for idx, item in enumerate(items, start=1):
+    for item in items:
         blocks.append(
             '<div style="margin-bottom: 14px;">'
-            f'<div style="{ARTICLE_TITLE_STYLE}">{idx}) {escape(item["title"])}</div>'
+            f'<div style="{ARTICLE_TITLE_STYLE}">- {escape(item["title"])}</div>'
             f'<div><a href="{escape(item["link"], quote=True)}">기사 원문 보기</a></div>'
             '</div>'
         )
@@ -1241,14 +1350,22 @@ def make_education_points_html(points: list[str]) -> str:
 
 
 def make_structured_briefing_html(selected_by_category: dict, summary_data: dict) -> str:
-    blocks = [
-        '<div style="font-size: 20px; font-weight: bold; margin-top: 4px; margin-bottom: 12px;">핵심 브리핑</div>',
-        make_text_block_html(summary_data.get("core", []), "오늘 수집된 주요 이슈를 정리했습니다."),
+    blocks = []
+
+    if summary_data.get("core"):
+        blocks.extend(
+            [
+                '<div style="font-size: 18px; font-weight: bold; margin-top: 4px; margin-bottom: 10px;">핵심 브리핑</div>',
+                make_text_block_html(summary_data.get("core", []), "오늘 수집된 주요 이슈를 정리했습니다."),
+            ]
+        )
+
+    blocks.append(
         make_official_updates_html(
             selected_by_category.get("공식기관 업데이트", {}),
             section_number=1,
-        ),
-    ]
+        )
+    )
 
     for section_number, category in enumerate(CATEGORIES.keys(), start=2):
         blocks.append(
@@ -1256,13 +1373,8 @@ def make_structured_briefing_html(selected_by_category: dict, summary_data: dict
                 section_number,
                 category,
                 selected_by_category.get(category, []),
-                summary_data.get("categories", {}).get(category, {}),
             )
         )
-
-    education_html = make_education_points_html(summary_data.get("education", []))
-    if education_html:
-        blocks.append(education_html)
 
     return "\n".join(blocks)
 
