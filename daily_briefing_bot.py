@@ -52,7 +52,9 @@ MAIL_BCC = [
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 # Gemini 모델명
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
+# GitHub Secrets의 GEMINI_MODEL도 gemini-2.5-flash로 변경해야 함.
+# 모델이 폐기되면 Gemini API가 404를 반환할 수 있음.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 
 # Gemini 사용 여부
 USE_GEMINI = True if GEMINI_API_KEY else False
@@ -140,6 +142,8 @@ OFFICIAL_RSS_SOURCES = {
     "MFDS": [
         "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0003",
         "http://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0004",
+        "https://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0003",
+        "https://www.mfds.go.kr/www/rss/brd.do?brdId=ntc0004",
     ],
     "EMA": [
         "https://www.ema.europa.eu/en/news.xml",
@@ -157,6 +161,14 @@ OFFICIAL_RSS_SOURCES = {
 # - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/drugs/rss.xml
 # - https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/biologics/rss.xml
 # Add FDA back to OFFICIAL_RSS_SOURCES when a parseable official RSS XML URL is confirmed.
+
+MFDS_FALLBACK_QUERIES = [
+    "site:mfds.go.kr 식약처 의약품",
+    "site:mfds.go.kr 식약처 바이오의약품",
+    "site:mfds.go.kr 식약처 GMP",
+    "site:mfds.go.kr 식약처 백신",
+    "site:mfds.go.kr 식약처 첨단바이오의약품",
+]
 
 
 # =========================================================
@@ -191,6 +203,19 @@ OFFICIAL_HIGH_VALUE_TERMS = [
 OFFICIAL_LOW_VALUE_TERMS = [
     "채용", "행사", "공모", "교육", "설명회", "워크숍", "세미나",
     "recruit", "career", "event", "webinar", "workshop",
+]
+
+EMA_LOW_VALUE_TERMS = [
+    "human medicines european public assessment report",
+    "epar",
+    "document revision",
+    "status update",
+    "assessment report",
+]
+
+EMA_HIGH_VALUE_TERMS = [
+    "news", "regulatory", "safety", "inspection", "gmp",
+    "medicine", "vaccine", "biologics", "public health",
 ]
 
 AUTHORITY_TERMS = [
@@ -289,24 +314,86 @@ def is_entry_in_briefing_window(entry: dict, period: str, now: datetime) -> bool
 
 
 def normalize_title_for_similarity(title: str) -> str:
+    return normalize_title_for_dedup(title)
+
+
+def normalize_title_for_dedup(title: str) -> str:
     normalized = title.lower()
 
     for source_name in SOURCE_PRIORITY:
         normalized = normalized.replace(source_name.lower(), "")
 
+    normalized = re.sub(r"\s-\s[^\-]+$", "", normalized)
+    normalized = normalized.replace("롯데바이오로직스", "롯데바이오")
+    normalized = normalized.replace("완공", "준공")
+    normalized = normalized.replace("준공식", "준공")
+    normalized = normalized.replace("…", "")
+    normalized = normalized.replace("...", "")
+
+    removable_terms = [
+        "관련 기사", "관련기사", "단독", "속보", "종합", "영상",
+        "공식", "발표", "관련", "대해", "대한", "으로", "에서",
+        "하고", "하며", "했다", "한다",
+    ]
+    for term in removable_terms:
+        normalized = normalized.replace(term, "")
+
     normalized = re.sub(r"[\s\"'“”‘’\[\]\(\){}<>〈〉《》「」『』·,.:;!?…_\-–—/\\|]", "", normalized)
     return normalized.strip()
 
 
-def is_similar_issue(title_a: str, title_b: str) -> bool:
-    normalized_a = normalize_title_for_similarity(title_a)
-    normalized_b = normalize_title_for_similarity(title_b)
+def extract_issue_tokens(title: str) -> set[str]:
+    normalized = title.lower()
+    normalized = re.sub(r"\s-\s[^\-]+$", "", normalized)
+    normalized = normalized.replace("롯데바이오로직스", "롯데바이오")
+    normalized = normalized.replace("완공", "준공")
+    normalized = normalized.replace("준공식", "준공")
+    tokens = set(re.findall(r"[가-힣A-Za-z0-9]+", normalized))
+
+    stopwords = {
+        "관련", "기사", "공식", "발표", "단독", "속보", "종합",
+        "오늘", "이번", "대한", "대해", "으로", "에서",
+    }
+    return {token for token in tokens if token not in stopwords and len(token) > 1}
+
+
+def has_same_core_event(title_a: str, title_b: str) -> bool:
+    tokens_a = extract_issue_tokens(title_a)
+    tokens_b = extract_issue_tokens(title_b)
+    shared = tokens_a & tokens_b
+
+    company_terms = {"롯데바이오", "삼성바이오", "셀트리온", "sk바이오", "유한양행"}
+    location_terms = {"송도", "오송", "대전", "인천", "공장", "1공장", "2공장"}
+    event_terms = {"준공", "착공", "허가", "승인", "완공", "생산", "출시", "계약"}
+
+    has_company = bool(shared & company_terms)
+    has_location = bool(shared & location_terms)
+    has_event = bool((tokens_a & event_terms) and (tokens_b & event_terms))
+
+    return has_company and has_location and has_event
+
+
+def is_same_issue(title_a: str, title_b: str) -> bool:
+    normalized_a = normalize_title_for_dedup(title_a)
+    normalized_b = normalize_title_for_dedup(title_b)
 
     if not normalized_a or not normalized_b:
         return False
 
     similarity = SequenceMatcher(None, normalized_a, normalized_b).ratio()
-    return similarity >= 0.82
+    if similarity >= 0.78:
+        return True
+
+    tokens_a = extract_issue_tokens(title_a)
+    tokens_b = extract_issue_tokens(title_b)
+    union = tokens_a | tokens_b
+    token_overlap = len(tokens_a & tokens_b) / len(union) if union else 0
+
+    return token_overlap >= 0.45 or has_same_core_event(title_a, title_b)
+
+
+def is_similar_issue(title_a: str, title_b: str) -> bool:
+    return is_same_issue(title_a, title_b)
 
 
 def select_representative_article(group: list[dict]) -> dict:
@@ -339,12 +426,15 @@ def group_similar_issues(candidates: list[dict]) -> list[list[dict]]:
     return groups
 
 
-def select_final_articles(candidates: list[dict], limit: int) -> list[dict]:
+def select_final_articles(candidates: list[dict], limit: int, category_name: str = "") -> list[dict]:
     issue_groups = group_similar_issues(candidates)
     representatives = [
         select_representative_article(group)
         for group in issue_groups
     ]
+
+    if category_name:
+        print(f"[중복 제거] {category_name}: {len(candidates)}개 → {len(representatives)}개")
 
     representatives.sort(
         key=lambda item: (
@@ -359,7 +449,19 @@ def select_final_articles(candidates: list[dict], limit: int) -> list[dict]:
     return representatives[:limit]
 
 
-def score_official_update(title: str) -> int:
+def get_official_feed_priority(agency: str, rss_url: str) -> int:
+    if agency == "EMA":
+        if rss_url.endswith("/news.xml"):
+            return 30
+        if rss_url.endswith("/inspections.xml"):
+            return 25
+        if rss_url.endswith("/whats-new.xml"):
+            return 10
+
+    return 0
+
+
+def score_official_update(title: str, agency: str = "", rss_url: str = "") -> int:
     title_lower = title.lower()
     score = 0
 
@@ -371,7 +473,124 @@ def score_official_update(title: str) -> int:
         if term.lower() in title_lower:
             score -= 8
 
+    if agency == "EMA":
+        for term in EMA_HIGH_VALUE_TERMS:
+            if term.lower() in title_lower:
+                score += 8
+
+        for term in EMA_LOW_VALUE_TERMS:
+            if term.lower() in title_lower:
+                score -= 25
+
+    score += get_official_feed_priority(agency, rss_url)
+
     return score
+
+
+def parse_mfds_rss_with_diagnostics(rss_url: str):
+    print("[MFDS RSS 진단]")
+    print(f"URL: {rss_url}")
+
+    try:
+        response = requests.get(
+            rss_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"status_code: request_failed")
+        print(f"content_type: unknown")
+        print(f"preview: {e}")
+        return feedparser.parse("")
+
+    content_type = response.headers.get("content-type", "")
+    preview = response.text[:300].replace("\n", " ").replace("\r", " ").strip()
+    feed = feedparser.parse(response.content)
+
+    print(f"status_code: {response.status_code}")
+    print(f"content_type: {content_type}")
+    print(f"preview: {preview}")
+    print(f"bozo: {bool(getattr(feed, 'bozo', False))}")
+    print(f"entries: {len(feed.entries)}")
+
+    if "xml" not in content_type.lower() and not response.text.lstrip().startswith("<?xml"):
+        print("[경고] MFDS RSS가 XML이 아닌 응답을 반환했습니다. HTML/차단/리다이렉트/오류 페이지일 수 있습니다.")
+
+    if response.status_code >= 400:
+        print("[경고] MFDS RSS HTTP 오류 응답입니다.")
+
+    return feed
+
+
+def make_official_item(
+    agency: str,
+    title: str,
+    link: str,
+    published_at: datetime | None,
+    candidate_order: int,
+    rss_url: str = "",
+) -> dict:
+    return {
+        "category": "공식기관 업데이트",
+        "title": title,
+        "source": agency,
+        "link": link,
+        "published_at": published_at,
+        "official_score": score_official_update(title, agency, rss_url),
+        "candidate_order": candidate_order,
+    }
+
+
+def sort_official_candidates(candidates: list[dict]) -> list[dict]:
+    return sorted(
+        candidates,
+        key=lambda item: (
+            item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            item["official_score"],
+            -item["candidate_order"],
+        ),
+        reverse=True,
+    )
+
+
+def fetch_mfds_fallback_updates(existing_links: set, existing_titles: set) -> list[dict]:
+    print("[MFDS fallback] Google News RSS 검색을 시도합니다.")
+    candidates = []
+
+    for query in MFDS_FALLBACK_QUERIES:
+        rss_url = build_google_news_rss_url(query)
+        feed = feedparser.parse(rss_url)
+        print(f"  query: {query}")
+        print(f"  entries: {len(feed.entries)}")
+
+        for entry in feed.entries:
+            title = entry.get("title", "").strip()
+            link = entry.get("link", "").strip()
+            source = entry.get("source", {}).get("title", "MFDS")
+            title = clean_google_news_title(title, source)
+            published_at = get_entry_published_datetime(entry)
+
+            if not title or not link:
+                continue
+
+            normalized = normalize_title(title)
+
+            if link in existing_links or normalized in existing_titles:
+                continue
+
+            candidates.append(
+                make_official_item(
+                    "MFDS",
+                    title,
+                    link,
+                    published_at,
+                    len(candidates),
+                )
+            )
+            existing_links.add(link)
+            existing_titles.add(normalized)
+
+    return sort_official_candidates(candidates)[:OFFICIAL_ITEMS_PER_AGENCY]
 
 
 def fetch_official_updates() -> dict[str, list[dict]]:
@@ -385,7 +604,10 @@ def fetch_official_updates() -> dict[str, list[dict]]:
 
         for rss_url in rss_urls:
             try:
-                feed = feedparser.parse(rss_url)
+                if agency == "MFDS":
+                    feed = parse_mfds_rss_with_diagnostics(rss_url)
+                else:
+                    feed = feedparser.parse(rss_url)
             except Exception as e:
                 print(f"[경고] 공식기관 RSS 수집 실패: {agency} / {rss_url} / {e}")
                 continue
@@ -393,8 +615,9 @@ def fetch_official_updates() -> dict[str, list[dict]]:
             if getattr(feed, "bozo", False):
                 print(f"[경고] 공식기관 RSS 파싱 경고: {agency} / {rss_url}")
 
-            print(f"  RSS URL: {rss_url}")
-            print(f"  entries: {len(feed.entries)}")
+            if agency != "MFDS":
+                print(f"  RSS URL: {rss_url}")
+                print(f"  entries: {len(feed.entries)}")
 
             for entry in feed.entries:
                 # 공식기관 RSS는 오전/오후 브리핑 시간창을 적용하지 않는다.
@@ -411,29 +634,24 @@ def fetch_official_updates() -> dict[str, list[dict]]:
                 if link in seen_links or normalized in seen_titles:
                     continue
 
-                item = {
-                    "category": "공식기관 업데이트",
-                    "title": title,
-                    "source": agency,
-                    "link": link,
-                    "published_at": published_at,
-                    "official_score": score_official_update(title),
-                    "candidate_order": len(agency_candidates),
-                }
+                item = make_official_item(
+                    agency,
+                    title,
+                    link,
+                    published_at,
+                    len(agency_candidates),
+                    rss_url,
+                )
                 agency_candidates.append(item)
                 seen_links.add(link)
                 seen_titles.add(normalized)
 
-        agency_candidates.sort(
-            key=lambda item: (
-                item["published_at"] or datetime.min.replace(tzinfo=timezone.utc),
-                item["official_score"],
-                -item["candidate_order"],
-            ),
-            reverse=True,
-        )
+        if agency == "MFDS" and not agency_candidates:
+            agency_candidates = fetch_mfds_fallback_updates(seen_links, seen_titles)
 
+        agency_candidates = sort_official_candidates(agency_candidates)
         updates_by_agency[agency] = agency_candidates[:OFFICIAL_ITEMS_PER_AGENCY]
+        print(f"  candidates: {len(agency_candidates)}")
         print(f"  selected: {len(updates_by_agency[agency])}")
 
     return updates_by_agency
@@ -581,7 +799,7 @@ def collect_selected_news(period: str, now: datetime) -> dict:
         print(f"[수집] {category_name}")
         candidates = fetch_category_news(category_name, queries, period, now)
 
-        selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY)
+        selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY, category_name)
         selected_by_category[category_name] = selected
 
         print(f"  후보 {len(candidates)}개 중 {len(selected)}개 선별")
@@ -752,9 +970,18 @@ def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) ->
         }
     }
 
-    response = requests.post(url, json=payload, timeout=60)
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+    except Exception:
+        print("[Gemini]")
+        print(f"model: {GEMINI_MODEL}")
+        print("status: failed / request_error")
+        raise
 
     if response.status_code != 200:
+        print("[Gemini]")
+        print(f"model: {GEMINI_MODEL}")
+        print(f"status: failed / {response.status_code}")
         raise RuntimeError(
             f"Gemini API 호출 실패: {response.status_code} / {response.text}"
         )
@@ -1105,6 +1332,7 @@ def main():
     print("========================================")
     print("Daily AI·GMP·Bio Briefing Bot")
     print("========================================")
+    # GitHub Actions 실행 로그에서 스케줄/타임존을 확인하기 위한 출력입니다.
     print("[실행 시간]")
     print(f"UTC: {utc_now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
