@@ -69,10 +69,7 @@ OFFICIAL_ITEMS_PER_AGENCY = 3
 CORE_BRIEFING_MAX_CHARS = 700
 
 KST = ZoneInfo("Asia/Seoul")
-BRIEFING_LOOKBACK_HOURS = {
-    "morning": 18,
-    "afternoon": 6,
-}
+GENERAL_LOOKBACK_HOURS = 24
 RELAXED_CATEGORY_LOOKBACK_HOURS = 72
 
 
@@ -80,27 +77,8 @@ def get_kst_now() -> datetime:
     return datetime.now(KST)
 
 
-def get_briefing_period(now: datetime | None = None) -> str:
-    now = now or get_kst_now()
-
-    if now.hour < 12:
-        return "morning"
-
-    return "afternoon"
-
-
-def get_briefing_label(period: str) -> str:
-    return "오전" if period == "morning" else "오후"
-
-
-def get_briefing_prompt_context(period: str) -> str:
-    if period == "morning":
-        return "전날 오후부터 당일 오전까지 확인된 공개 뉴스 중심의 오전 브리핑"
-
-    return (
-        "당일 오전 이후 새로 확인된 공개 뉴스 중심의 오후 업데이트 브리핑. "
-        "오전 브리핑과 중복될 가능성이 있는 반복 이슈는 가능하면 새로운 관점이 있을 때만 포함"
-    )
+def get_briefing_prompt_context() -> str:
+    return "최근 24시간 이내 확인된 공개 뉴스 중심의 일일 Daily Briefing"
 
 
 # =========================================================
@@ -365,16 +343,6 @@ def get_entry_published_datetime(entry: dict) -> datetime | None:
         return None
 
     return datetime(*published_time[:6], tzinfo=timezone.utc)
-
-
-def is_entry_in_briefing_window(entry: dict, period: str, now: datetime) -> bool:
-    published_at = get_entry_published_datetime(entry)
-
-    if published_at is None:
-        return True
-
-    lookback_hours = BRIEFING_LOOKBACK_HOURS[period]
-    return published_at >= now.astimezone(timezone.utc) - timedelta(hours=lookback_hours)
 
 
 def is_entry_in_lookback_window(entry: dict, now: datetime, lookback_hours: int | None) -> bool:
@@ -708,7 +676,7 @@ def fetch_official_updates() -> dict[str, list[dict]]:
                 print(f"  entries: {len(feed.entries)}")
 
             for entry in feed.entries:
-                # 공식기관 RSS는 오전/오후 브리핑 시간창을 적용하지 않는다.
+                # 공식기관 RSS는 Daily Briefing 시간창을 적용하지 않는다.
                 # 며칠 전 항목이어도 RSS상 최신이고 관련성이 높으면 표시될 수 있게 한다.
                 title = entry.get("title", "").strip()
                 link = entry.get("link", "").strip()
@@ -751,18 +719,13 @@ def fetch_official_updates() -> dict[str, list[dict]]:
 def fetch_category_news(
     category_name: str,
     queries: list[str],
-    period: str,
     now: datetime,
     lookback_hours: int | None = None,
 ) -> list[dict]:
     items = []
     seen_links = set()
     seen_titles = set()
-    effective_lookback_hours = (
-        BRIEFING_LOOKBACK_HOURS[period]
-        if lookback_hours is None
-        else lookback_hours
-    )
+    effective_lookback_hours = GENERAL_LOOKBACK_HOURS if lookback_hours is None else lookback_hours
 
     for query in queries:
         rss_url = build_google_news_rss_url(query)
@@ -880,7 +843,7 @@ def score_article(item: dict) -> int:
 # 6. 전체 뉴스 수집 및 카테고리별 선별
 # =========================================================
 
-def collect_selected_news(period: str, now: datetime) -> dict:
+def collect_selected_news(now: datetime) -> dict:
     selected_by_category = {}
 
     print("[수집] 공식기관 업데이트")
@@ -899,7 +862,7 @@ def collect_selected_news(period: str, now: datetime) -> dict:
 
     for category_name, queries in CATEGORIES.items():
         print(f"[수집] {category_name}")
-        candidates = fetch_category_news(category_name, queries, period, now)
+        candidates = fetch_category_news(category_name, queries, now)
 
         selected = select_final_articles(candidates, FINAL_ITEMS_PER_CATEGORY, category_name)
 
@@ -908,7 +871,6 @@ def collect_selected_news(period: str, now: datetime) -> dict:
             fallback_candidates = fetch_category_news(
                 category_name,
                 CRITICAL_CATEGORY_FALLBACK_QUERIES[category_name],
-                period,
                 now,
                 lookback_hours=RELAXED_CATEGORY_LOOKBACK_HOURS,
             )
@@ -964,9 +926,9 @@ def build_articles_text(selected_by_category: dict) -> str:
     return "\n".join(lines)
 
 
-def generate_ai_briefing_with_gemini(selected_by_category: dict, period: str) -> str:
+def generate_ai_briefing_with_gemini(selected_by_category: dict) -> str:
     articles_text = build_articles_text(selected_by_category)
-    briefing_context = get_briefing_prompt_context(period)
+    briefing_context = get_briefing_prompt_context()
 
     prompt = f"""
 다음은 공식기관 RSS와 Google News RSS에서 수집한 AI, 제약·바이오, 백신·바이오의약품, GMP·품질 관련 기사 후보입니다.
@@ -1548,12 +1510,10 @@ def remove_ai_official_section(briefing: str) -> str:
 # 10. 메일 본문 생성
 # =========================================================
 
-def make_email_body(selected_by_category: dict, period: str, today: str) -> str:
-    briefing_label = get_briefing_label(period)
-
+def make_email_body(selected_by_category: dict, today: str) -> str:
     if USE_GEMINI:
         try:
-            briefing = generate_ai_briefing_with_gemini(selected_by_category, period)
+            briefing = generate_ai_briefing_with_gemini(selected_by_category)
             summary_data = parse_gemini_briefing_sections(briefing)
         except Exception as e:
             print("[경고] Gemini 브리핑 생성 실패. 기본 브리핑으로 대체합니다.")
@@ -1569,7 +1529,7 @@ def make_email_body(selected_by_category: dict, period: str, today: str) -> str:
   <body style="margin: 0; padding: 0; background-color: #ffffff;">
     <div style="font-family: Arial, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; color: #222222; font-size: 14px; line-height: 1.6;">
       <div style="font-size: 22px; font-weight: bold; margin-bottom: 18px;">
-        📰 {escape(briefing_label)} AI·GMP·바이오의약품 이슈 브리핑 ({escape(today)})
+        📰 오늘의 AI·GMP·바이오의약품 이슈 브리핑 ({escape(today)})
       </div>
       {briefing_html}
       <hr style="border: 0; border-top: 1px solid #dddddd; margin: 24px 0 14px;">
@@ -1614,8 +1574,6 @@ def main():
     now = get_kst_now()
     utc_now = now.astimezone(timezone.utc)
     today = now.strftime("%Y-%m-%d")
-    period = get_briefing_period(now)
-    briefing_label = get_briefing_label(period)
 
     print("========================================")
     print("Daily AI·GMP·Bio Briefing Bot")
@@ -1625,18 +1583,15 @@ def main():
     print(f"UTC: {utc_now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"KST: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"실행일: {today}")
-    print(f"브리핑 구분: {briefing_label}")
+    print("브리핑 구분: Daily")
     print(f"Gemini 사용 여부: {USE_GEMINI}")
     print("")
 
-    selected_by_category = collect_selected_news(period, now)
+    selected_by_category = collect_selected_news(now)
 
-    if period == "morning":
-        subject = f"[Morning Briefing] {today}, AI·GMP·바이오의약품 이슈"
-    else:
-        subject = f"[Afternoon Briefing] {today}, AI·GMP·바이오의약품 이슈"
+    subject = f"[Daily Briefing] {today}, AI·GMP·바이오의약품 이슈"
 
-    body = make_email_body(selected_by_category, period, today)
+    body = make_email_body(selected_by_category, today)
 
     print("")
     print("[메일 발송 시작]")
